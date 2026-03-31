@@ -16,6 +16,7 @@ use Crayon::AST qw[
     ClassDeclaration RoleDeclaration MethodDeclaration FieldDeclaration Attribute
     TryCatch Defer ArrayRef HashRef Regex Dereference
     UseDeclaration PackageDeclaration DoExpression
+    PostfixSlice
 ];
 
 our @EXPORT_OK = qw[ transform ];
@@ -165,19 +166,28 @@ sub _transform_ambiguous_function_call_expression ($node, $source) {
     my $name = $func_node->text;
     my $func_start = $func_node->start_byte;
     my @args;
+    my $block;
     for my $child ($node->child_nodes) {
         next unless $child->is_named;
         next if $child->is_extra;
         next if $child->start_byte == $func_start;
+        # indirect_object contains a block — extract as the block arg
+        if ($child->type eq 'indirect_object') {
+            $block = _transform_indirect_object($child, $source);
+            next;
+        }
         push @args, _transform_node($child, $source);
     }
 
     # Handle 'not' as a unary operator
-    if ($name eq 'not' && @args == 1) {
+    if ($name eq 'not' && @args == 1 && !$block) {
         return UnaryOp('not', $args[0]);
     }
 
-    Call($name, undef, \@args, undef, 0);
+    # Qualified name: split namespace
+    my ($namespace, $bare) = _split_qualified($name);
+
+    Call($bare, $namespace, \@args, $block, 0);
 }
 
 sub _transform_function_call_expression ($node, $source) {
@@ -261,6 +271,18 @@ sub _split_qualified ($name) {
 
 sub _transform_varname ($node, $source) {
     return $node->text;
+}
+
+sub _transform_function ($node, $source) {
+    # Function node: may contain & sigil + varname, or just a name
+    my $text = $node->text;
+    if ($text =~ s/^&//) {
+        my ($namespace, $name) = _split_qualified($text);
+        return Variable('&', $name, $namespace);
+    }
+    # Bare function name — used as Call target in ambiguous contexts
+    my ($namespace, $name) = _split_qualified($text);
+    return Call($name, $namespace, [], undef, 0);
 }
 
 sub _transform_bareword ($node, $source) {
@@ -1309,6 +1331,77 @@ sub _transform_localization_expression ($node, $source) {
         push @vars, $ast if defined $ast;
     }
     VariableDeclaration('local', \@vars);
+}
+
+# --- Do Expression ---
+
+# --- Indirect Object (block arg in reduce { } @list style) ---
+
+sub _transform_indirect_object ($node, $source) {
+    # Contains a block child — extract it
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'block') {
+            return _transform_node($child, $source);
+        }
+    }
+    # Fallback: just transform first named child
+    for my $child ($node->child_nodes) {
+        if ($child->is_named) {
+            return _transform_node($child, $source);
+        }
+    }
+    return undef;
+}
+
+# --- Slices ---
+
+sub _transform_slice_expression ($node, $source) {
+    # @a[0,1] or @h{qw(a b)} — container + index list
+    my ($target, $index, $kind);
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'slice_container_variable') {
+            $target = _transform_slice_container_variable($child, $source);
+        } elsif ($child->is_named && !$index) {
+            $index = _transform_node($child, $source);
+        } elsif (!$child->is_named) {
+            $kind = 'array' if $child->text eq '[';
+            $kind = 'hash'  if $child->text eq '{';
+        }
+    }
+    $kind //= 'array';
+    Subscript($target, $index, $kind, 0);
+}
+
+sub _transform_slice_container_variable ($node, $source) {
+    my $text = $node->text;
+    # @arr or %hash — extract sigil and name
+    if ($text =~ /^([@%])(.+)$/) {
+        my ($sigil, $name) = ($1, $2);
+        my ($namespace, $bare) = _split_qualified($name);
+        return Variable($sigil, $bare, $namespace);
+    }
+    die "Cannot parse slice_container_variable: $text\n";
+}
+
+# --- Array length ($#array) ---
+
+sub _transform_arraylen ($node, $source) {
+    my $text = $node->text;
+    $text =~ s/^\$#//;
+    my ($namespace, $name) = _split_qualified($text);
+    Variable('$#', $name, $namespace);
+}
+
+# --- Stub expression (forward declaration body) ---
+
+sub _transform_stub_expression ($node, $source) {
+    Yada();
+}
+
+# --- Escape sequence (inside interpolated strings) ---
+
+sub _transform_escape_sequence ($node, $source) {
+    String($node->text, 0);
 }
 
 # --- Do Expression ---

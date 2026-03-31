@@ -94,4 +94,41 @@ use Crayon::Test qw[ crayon_parse crayon_expr ];
     is $ast->{kind}, 'block', 'do kind';
 }
 
+# sub reference
+{
+    my $ast = crayon_expr('\&Foo::bar');
+    is $ast->{type}, 'UnaryOp', 'sub ref is unary op';
+    is $ast->{operator}, '\\', 'ref operator';
+    is $ast->{operand}{type}, 'Variable', 'operand is variable';
+    is $ast->{operand}{sigil}, '&', 'sigil is &';
+    is $ast->{operand}{name}, 'bar', 'function name';
+    is $ast->{operand}{namespace}, 'Foo', 'function namespace';
+}
+
+# indirect object (block-first call)
+{
+    my $ast = crayon_expr('List::Util::reduce { $a + $b } @foo');
+    is $ast->{type}, 'Call', 'reduce is Call';
+    is $ast->{name}, 'reduce', 'function name';
+    is $ast->{namespace}, 'List::Util', 'namespace';
+    ok $ast->{block}, 'has block arg';
+    is $ast->{block}{type}, 'Block', 'block arg is Block';
+}
+
+# array slice
+{
+    my $ast = crayon_expr('@a[0, 1, 2]');
+    is $ast->{type}, 'Subscript', 'slice type';
+    is $ast->{kind}, 'array', 'slice kind';
+    is $ast->{target}{sigil}, '@', 'slice target sigil';
+}
+
+# array length
+{
+    my $ast = crayon_expr('$#array');
+    is $ast->{type}, 'Variable', '$# type';
+    is $ast->{sigil}, '$#', '$# sigil';
+    is $ast->{name}, 'array', '$# name';
+}
+
 done_testing;
