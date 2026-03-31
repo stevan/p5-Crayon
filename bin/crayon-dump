@@ -1,0 +1,17 @@
+#!/usr/bin/env perl
+use v5.42;
+use utf8;
+
+use FindBin;
+use lib "$FindBin::Bin/../lib";
+
+use Crayon;
+use Data::Dumper;
+
+local $Data::Dumper::Indent   = 1;
+local $Data::Dumper::Sortkeys = 1;
+local $Data::Dumper::Terse    = 1;
+
+my $source = do { local $/; <STDIN> };
+my $ast = Crayon::parse($source);
+say Dumper($ast);
