@@ -6,7 +6,7 @@ use Exporter 'import';
 
 use Crayon::AST qw[
     Program StatementSequence ExpressionStatement PostfixModifier Block
-    Integer Float String Bool Undef SpecialLiteral QuotedWords Yada
+    Integer Float String Bool Undef SpecialLiteral QuotedWords Yada Version
     Call MethodCall
     Variable VariableDeclaration Assignment
     BinaryOp UnaryOp PostfixOp Ternary
@@ -14,6 +14,8 @@ use Crayon::AST qw[
     Conditional ElsifClause WhileLoop ForeachLoop CStyleForLoop LoopControl
     SubroutineDeclaration Signature ScalarParam SlurpyParam AnonymousSub
     ClassDeclaration RoleDeclaration MethodDeclaration FieldDeclaration Attribute
+    TryCatch Defer ArrayRef HashRef Regex Dereference
+    UseDeclaration PackageDeclaration DoExpression
 ];
 
 our @EXPORT_OK = qw[ transform ];
@@ -262,6 +264,10 @@ sub _transform_varname ($node, $source) {
 }
 
 sub _transform_bareword ($node, $source) {
+    return String($node->text, 0);
+}
+
+sub _transform_autoquoted_bareword ($node, $source) {
     return String($node->text, 0);
 }
 
@@ -1050,6 +1056,279 @@ sub _transform_attrlist ($node, $source) {
         }
     }
     \@attributes;
+}
+
+# --- Try/Catch/Defer ---
+
+sub _transform_try_statement ($node, $source) {
+    my $try_node     = $node->try_child_by_field_name("try_block");
+    my $catch_node   = $node->try_child_by_field_name("catch_block");
+    my $finally_node = $node->try_child_by_field_name("finally_block");
+    my $catch_var_node = $node->try_child_by_field_name("catch_expr");
+
+    my $try_block     = $try_node     ? _transform_node($try_node, $source)     : undef;
+    my $catch_block   = $catch_node   ? _transform_node($catch_node, $source)   : undef;
+    my $finally_block = $finally_node ? _transform_node($finally_node, $source) : undef;
+    my $catch_var     = $catch_var_node ? _transform_node($catch_var_node, $source) : undef;
+
+    TryCatch($try_block, $catch_var, $catch_block, $finally_block);
+}
+
+sub _transform_defer_statement ($node, $source) {
+    my $block_node = $node->try_child_by_field_name("block");
+    # Fall back to finding block child
+    if (!$block_node) {
+        for my $child ($node->child_nodes) {
+            if ($child->is_named && $child->type eq 'block') {
+                $block_node = $child;
+                last;
+            }
+        }
+    }
+    Defer(_transform_node($block_node, $source));
+}
+
+# --- Anonymous Array/Hash ---
+
+sub _transform_anonymous_array_expression ($node, $source) {
+    my @elements;
+    for my $child ($node->child_nodes) {
+        my $type = $child->type;
+        next if !$child->is_named && $type ne 'scalar';
+        next if $child->is_extra;
+        my $ast = _transform_node($child, $source);
+        push @elements, $ast if defined $ast;
+    }
+    ArrayRef(\@elements);
+}
+
+sub _transform_anonymous_hash_expression ($node, $source) {
+    my @elements;
+    for my $child ($node->child_nodes) {
+        my $type = $child->type;
+        next if !$child->is_named && $type ne 'scalar';
+        next if $child->is_extra;
+        my $ast = _transform_node($child, $source);
+        push @elements, $ast if defined $ast;
+    }
+    HashRef(\@elements);
+}
+
+# --- Regex ---
+
+sub _transform_match_regexp ($node, $source) {
+    my $content_node = $node->try_child_by_field_name("content");
+    my $mod_node     = $node->try_child_by_field_name("modifiers");
+    my $pattern = $content_node ? $content_node->text : '';
+    my $flags   = $mod_node    ? $mod_node->text      : undef;
+    Regex($pattern, undef, $flags, 'm');
+}
+
+sub _transform_quoted_regexp ($node, $source) {
+    my $content_node = $node->try_child_by_field_name("content");
+    my $mod_node     = $node->try_child_by_field_name("modifiers");
+    my $pattern = $content_node ? $content_node->text : '';
+    my $flags   = $mod_node    ? $mod_node->text      : undef;
+    Regex($pattern, undef, $flags, 'qr');
+}
+
+sub _transform_substitution_regexp ($node, $source) {
+    my $content_node     = $node->try_child_by_field_name("content");
+    my $replacement_node = $node->try_child_by_field_name("replacement");
+    my $mod_node         = $node->try_child_by_field_name("modifiers");
+    my $pattern     = $content_node     ? $content_node->text     : '';
+    my $replacement = $replacement_node ? $replacement_node->text : '';
+    my $flags       = $mod_node         ? $mod_node->text         : undef;
+    Regex($pattern, $replacement, $flags, 's');
+}
+
+sub _transform_transliteration_expression ($node, $source) {
+    my $content_node     = $node->try_child_by_field_name("content");
+    my $replacement_node = $node->try_child_by_field_name("replacement");
+    my $mod_node         = $node->try_child_by_field_name("modifiers");
+    my $pattern     = $content_node     ? $content_node->text     : '';
+    my $replacement = $replacement_node ? $replacement_node->text : '';
+    my $flags       = $mod_node         ? $mod_node->text         : undef;
+    Regex($pattern, $replacement, $flags, 'tr');
+}
+
+# --- Postfix Dereference ---
+
+sub _transform_array_deref_expression ($node, $source) {
+    my $target_node = $node->try_child_by_field_name("arrayref");
+    if (!$target_node) {
+        for my $child ($node->child_nodes) {
+            if ($child->type eq 'scalar' || ($child->is_named && $child->type ne 'block')) {
+                $target_node = $child;
+                last;
+            }
+        }
+    }
+    Dereference(_transform_node($target_node, $source), '@');
+}
+
+sub _transform_hash_deref_expression ($node, $source) {
+    my $target_node = $node->try_child_by_field_name("hashref");
+    if (!$target_node) {
+        for my $child ($node->child_nodes) {
+            if ($child->type eq 'scalar' || ($child->is_named && $child->type ne 'block')) {
+                $target_node = $child;
+                last;
+            }
+        }
+    }
+    Dereference(_transform_node($target_node, $source), '%');
+}
+
+sub _transform_scalar_deref_expression ($node, $source) {
+    my $target_node = $node->try_child_by_field_name("scalarref");
+    if (!$target_node) {
+        for my $child ($node->child_nodes) {
+            if ($child->type eq 'scalar' || ($child->is_named && $child->type ne 'block')) {
+                $target_node = $child;
+                last;
+            }
+        }
+    }
+    Dereference(_transform_node($target_node, $source), '$');
+}
+
+# --- Use / Package ---
+
+sub _transform_use_statement ($node, $source) {
+    # Keyword: "use" or "no"
+    my $keyword;
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && ($child->text eq 'use' || $child->text eq 'no')) {
+            $keyword = $child->text;
+            last;
+        }
+    }
+    $keyword //= 'use';
+
+    my $module_node  = $node->try_child_by_field_name("module");
+    my $version_node = $node->try_child_by_field_name("version");
+
+    my $module  = $module_node  ? $module_node->text  : undef;
+    my $version = $version_node ? $version_node->text : undef;
+
+    # Remaining named children are imports
+    my @imports;
+    my %skip;
+    $skip{$module_node->start_byte}  = 1 if $module_node;
+    $skip{$version_node->start_byte} = 1 if $version_node;
+    for my $child ($node->child_nodes) {
+        my $type = $child->type;
+        next if !$child->is_named && $type ne 'scalar';
+        next if $child->is_extra;
+        next if $skip{$child->start_byte};
+        my $ast = _transform_node($child, $source);
+        push @imports, $ast if defined $ast;
+    }
+
+    UseDeclaration($keyword, $module, $version, @imports ? \@imports : undef);
+}
+
+sub _transform_use_version_statement ($node, $source) {
+    my $version_node = $node->try_child_by_field_name("version");
+    my $version = $version_node ? $version_node->text : undef;
+    UseDeclaration('use', undef, $version, undef);
+}
+
+sub _transform_version ($node, $source) {
+    Version($node->text);
+}
+
+sub _transform_package_statement ($node, $source) {
+    my $name_node    = $node->try_child_by_field_name("name");
+    my $version_node = $node->try_child_by_field_name("version");
+
+    my $name    = $name_node    ? $name_node->text    : undef;
+    my $version = $version_node ? $version_node->text : undef;
+
+    # Optional block body
+    my $body;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'block') {
+            $body = _transform_node($child, $source);
+            last;
+        }
+    }
+
+    PackageDeclaration($name, $version, $body);
+}
+
+# --- Map/Grep/Sort ---
+
+sub _transform_map_grep_expression ($node, $source) {
+    # Get function name from anonymous keyword child
+    my $name;
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && ($child->text eq 'map' || $child->text eq 'grep')) {
+            $name = $child->text;
+            last;
+        }
+    }
+
+    my $callback_node = $node->try_child_by_field_name("callback");
+    my $list_node     = $node->try_child_by_field_name("list");
+
+    my $block = $callback_node ? _transform_node($callback_node, $source) : undef;
+    my @args;
+    if ($list_node) {
+        push @args, _transform_node($list_node, $source);
+    }
+
+    Call($name, undef, \@args, $block, 0);
+}
+
+sub _transform_sort_expression ($node, $source) {
+    my $callback_node = $node->try_child_by_field_name("callback");
+    my $list_node     = $node->try_child_by_field_name("list");
+
+    my $block = $callback_node ? _transform_node($callback_node, $source) : undef;
+    my @args;
+    if ($list_node) {
+        push @args, _transform_node($list_node, $source);
+    }
+
+    Call('sort', undef, \@args, $block, 0);
+}
+
+# --- Localization ---
+
+sub _transform_localization_expression ($node, $source) {
+    my @vars;
+    for my $child ($node->child_nodes) {
+        my $type = $child->type;
+        next if !$child->is_named && $type ne 'scalar';
+        next if $child->is_extra;
+        # skip the "local" keyword
+        next if !$child->is_named && $type eq 'local';
+        my $ast = _transform_node($child, $source);
+        push @vars, $ast if defined $ast;
+    }
+    VariableDeclaration('local', \@vars);
+}
+
+# --- Do Expression ---
+
+sub _transform_do_expression ($node, $source) {
+    # Check for block child
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'block') {
+            return DoExpression('block', _transform_node($child, $source));
+        }
+    }
+    # Otherwise it's a do FILE
+    for my $child ($node->child_nodes) {
+        my $type = $child->type;
+        next if !$child->is_named && $type ne 'scalar';
+        next if $child->is_extra;
+        my $ast = _transform_node($child, $source);
+        return DoExpression('file', $ast) if defined $ast;
+    }
+    DoExpression('block', undef);
 }
 
 1;
