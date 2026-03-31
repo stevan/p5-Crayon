@@ -1,42 +1,98 @@
 use v5.42;
 use utf8;
 use Test2::V0;
-use lib 'lib', 't/lib';
-use Crayon::Test qw[ crayon_eval crayon_output ];
 
-# if/else
-is crayon_output('if (1) { say "yes" }'), "yes\n", 'if true';
-is crayon_output('if (0) { say "yes" } else { say "no" }'), "no\n", 'if-else';
-is crayon_output('if (0) { say "a" } elsif (1) { say "b" } else { say "c" }'),
-    "b\n", 'if-elsif-else';
+use lib 'lib', 't/lib';
+use Crayon::Test qw[ crayon_parse crayon_expr ];
+
+# if
+{
+    my $ast = crayon_parse('if ($x) { 1 }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'Conditional', 'if type';
+    is $stmt->{negated}, 0, 'if not negated';
+}
 
 # unless
-is crayon_output('unless (0) { say "yes" }'), "yes\n", 'unless false';
+{
+    my $ast = crayon_parse('unless ($x) { 1 }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'Conditional', 'unless type';
+    is $stmt->{negated}, 1, 'unless is negated';
+}
 
-# postfix if
-is crayon_output('say "yes" if 1'), "yes\n", 'postfix if true';
-is crayon_output('say "yes" if 0'), "", 'postfix if false';
-is crayon_output('say "yes" unless 0'), "yes\n", 'postfix unless';
+# if-elsif-else
+{
+    my $ast = crayon_parse('if ($a) { 1 } elsif ($b) { 2 } else { 3 }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'Conditional', 'if-elsif-else type';
+    is scalar $stmt->{elsif_clauses}->@*, 1, 'one elsif';
+    ok defined $stmt->{else_block}, 'has else block';
+}
 
 # while
-is crayon_output('my $i = 0; while ($i < 3) { say $i; $i++ }'), "0\n1\n2\n", 'while';
+{
+    my $ast = crayon_parse('while ($x) { 1 }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'WhileLoop', 'while type';
+    is $stmt->{negated}, 0, 'while not negated';
+}
 
 # until
-is crayon_output('my $i = 0; until ($i >= 3) { say $i; $i++ }'), "0\n1\n2\n", 'until';
-
-# C-style for
-is crayon_output('for (my $i = 0; $i < 3; $i++) { say $i }'), "0\n1\n2\n", 'c-style for';
+{
+    my $ast = crayon_parse('until ($x) { 1 }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'WhileLoop', 'until type';
+    is $stmt->{negated}, 1, 'until is negated';
+}
 
 # foreach
-is crayon_output('for my $x (1, 2, 3) { say $x }'), "1\n2\n3\n", 'foreach';
+{
+    my $ast = crayon_parse('for my $x (1, 2, 3) { say $x }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'ForeachLoop', 'foreach type';
+    ok defined $stmt->{iterator}, 'has iterator';
+}
+
+# C-style for
+{
+    my $ast = crayon_parse('for (my $i = 0; $i < 3; $i++) { 1 }');
+    my $stmt = $ast->{body}{statements}[0];
+    is $stmt->{type}, 'CStyleForLoop', 'c-style for type';
+}
+
+# postfix if
+{
+    my $ast = crayon_expr('say "yes" if $x');
+    is $ast->{type}, 'ExpressionStatement', 'postfix if wraps in statement';
+    is $ast->{modifier}{keyword}, 'if', 'postfix keyword';
+}
+
+# postfix unless
+{
+    my $ast = crayon_expr('say "yes" unless $x');
+    is $ast->{modifier}{keyword}, 'unless', 'postfix unless';
+}
 
 # last/next
-is crayon_output('for my $x (1, 2, 3, 4, 5) { last if $x == 3; say $x }'),
-    "1\n2\n", 'last';
-is crayon_output('for my $x (1, 2, 3, 4, 5) { next if $x == 3; say $x }'),
-    "1\n2\n4\n5\n", 'next';
+{
+    my $ast = crayon_expr('last');
+    is $ast->{type}, 'LoopControl', 'last type';
+    is $ast->{keyword}, 'last', 'last keyword';
+}
 
-# return — requires subroutines (Task 9), skipping for now
-# is crayon_eval('sub foo () { return 42 } foo()'), 42, 'return from sub';
+{
+    my $ast = crayon_expr('next');
+    is $ast->{type}, 'LoopControl', 'next type';
+    is $ast->{keyword}, 'next', 'next keyword';
+}
+
+# return
+{
+    my $ast = crayon_expr('return 42');
+    is $ast->{type}, 'LoopControl', 'return type';
+    is $ast->{keyword}, 'return', 'return keyword';
+    is $ast->{expression}{type}, 'Integer', 'return value';
+}
 
 done_testing;

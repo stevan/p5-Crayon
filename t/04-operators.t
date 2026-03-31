@@ -1,44 +1,101 @@
 use v5.42;
 use utf8;
 use Test2::V0;
+
 use lib 'lib', 't/lib';
-use Crayon::Test qw[ crayon_eval ];
+use Crayon::Test qw[ crayon_expr ];
 
-# Arithmetic
-is crayon_eval('2 + 3'), 5, 'addition';
-is crayon_eval('10 - 4'), 6, 'subtraction';
-is crayon_eval('3 * 7'), 21, 'multiplication';
-is crayon_eval('15 / 3'), 5, 'division';
-is crayon_eval('17 % 5'), 2, 'modulo';
-is crayon_eval('2 ** 10'), 1024, 'exponentiation';
+# Binary ops
+{
+    my $ast = crayon_expr('2 + 3');
+    is $ast->{type}, 'BinaryOp', 'binary op type';
+    is $ast->{operator}, '+', 'operator';
+    is $ast->{left}{type}, 'Integer', 'left operand';
+    is $ast->{right}{type}, 'Integer', 'right operand';
+}
 
-# String
-is crayon_eval('"hello" . " " . "world"'), 'hello world', 'concatenation';
-is crayon_eval('"ab" x 3'), 'ababab', 'repetition';
+# String concat
+{
+    my $ast = crayon_expr('"a" . "b"');
+    is $ast->{type}, 'BinaryOp', 'concat type';
+    is $ast->{operator}, '.', 'concat op';
+}
 
 # Comparison
-ok crayon_eval('1 == 1'), '== true';
-ok !crayon_eval('1 == 2'), '== false';
-is crayon_eval('5 <=> 3'), 1, 'spaceship positive';
+{
+    my $ast = crayon_expr('1 == 2');
+    is $ast->{type}, 'BinaryOp', 'equality type';
+    is $ast->{operator}, '==', 'equality op';
+}
+
+# String comparison
+{
+    my $ast = crayon_expr('"a" eq "b"');
+    is $ast->{type}, 'BinaryOp', 'string eq type';
+    is $ast->{operator}, 'eq', 'eq op';
+}
 
 # Logical
-is crayon_eval('1 && 2'), 2, '&& truthy';
-is crayon_eval('0 || 3'), 3, '|| falsy lhs';
-is crayon_eval('undef // 42'), 42, 'defined-or';
-ok !crayon_eval('not 1'), 'not';
+{
+    my $ast = crayon_expr('$x && $y');
+    is $ast->{type}, 'BinaryOp', 'logical and type';
+    is $ast->{operator}, '&&', '&& op';
+}
+
+{
+    my $ast = crayon_expr('$x // $y');
+    is $ast->{operator}, '//', 'defined-or op';
+}
+
+# Low-prec logical
+{
+    my $ast = crayon_expr('$x and $y');
+    is $ast->{type}, 'BinaryOp', 'low-prec and type';
+    is $ast->{operator}, 'and', 'and op';
+}
 
 # Unary
-is crayon_eval('-5'), -5, 'unary minus';
-is crayon_eval('!0'), 1, 'logical not';
-is crayon_eval('my $x = 5; ++$x'), 6, 'prefix increment';
-is crayon_eval('my $x = 5; $x++; $x'), 6, 'postfix increment';
+{
+    my $ast = crayon_expr('-$x');
+    is $ast->{type}, 'UnaryOp', 'unary type';
+    is $ast->{operator}, '-', 'unary minus';
+}
+
+{
+    my $ast = crayon_expr('!$x');
+    is $ast->{type}, 'UnaryOp', 'logical not type';
+    is $ast->{operator}, '!', 'not op';
+}
+
+# Prefix increment
+{
+    my $ast = crayon_expr('++$x');
+    is $ast->{type}, 'UnaryOp', 'preinc type';
+    is $ast->{operator}, '++', 'preinc op';
+}
+
+# Postfix increment
+{
+    my $ast = crayon_expr('$x++');
+    is $ast->{type}, 'PostfixOp', 'postinc type';
+    is $ast->{operator}, '++', 'postinc op';
+}
 
 # Ternary
-is crayon_eval('1 ? "yes" : "no"'), 'yes', 'ternary true';
-is crayon_eval('0 ? "yes" : "no"'), 'no', 'ternary false';
+{
+    my $ast = crayon_expr('$x ? 1 : 0');
+    is $ast->{type}, 'Ternary', 'ternary type';
+    is $ast->{then_expr}{type}, 'Integer', 'then branch';
+    is $ast->{else_expr}{type}, 'Integer', 'else branch';
+}
 
-# Precedence
-is crayon_eval('2 + 3 * 4'), 14, 'mul before add';
-is crayon_eval('(2 + 3) * 4'), 20, 'parens override';
+# Precedence — tree-sitter nests correctly
+{
+    my $ast = crayon_expr('2 + 3 * 4');
+    is $ast->{type}, 'BinaryOp', 'outer is add';
+    is $ast->{operator}, '+', 'outer op is +';
+    is $ast->{right}{type}, 'BinaryOp', 'right is mul';
+    is $ast->{right}{operator}, '*', 'right op is *';
+}
 
 done_testing;

@@ -7,11 +7,12 @@ use Exporter 'import';
 use Crayon::AST qw[
     Program StatementSequence ExpressionStatement PostfixModifier Block
     Integer Float String Bool Undef SpecialLiteral QuotedWords Yada
-    Call
+    Call MethodCall
     Variable VariableDeclaration Assignment
     BinaryOp UnaryOp PostfixOp Ternary
     Subscript ParenExpression ExpressionList
     Conditional ElsifClause WhileLoop ForeachLoop CStyleForLoop LoopControl
+    SubroutineDeclaration Signature ScalarParam SlurpyParam AnonymousSub
 ];
 
 our @EXPORT_OK = qw[ transform ];
@@ -506,30 +507,61 @@ sub _transform_conditional_statement ($node, $source) {
     my $condition  = _transform_node($cond_node, $source);
     my $then_block = _transform_node($block_node, $source);
 
-    # Scan for elsif and else children
+    # Collect elsif/else — note: else nests inside the last elsif
     my @elsif_clauses;
     my $else_block;
-    for my $child ($node->child_nodes) {
-        if ($child->type eq 'elsif') {
-            my $elsif_cond  = $child->try_child_by_field_name("condition");
-            my $elsif_block = $child->try_child_by_field_name("block");
-            push @elsif_clauses, ElsifClause(
-                _transform_node($elsif_cond, $source),
-                _transform_node($elsif_block, $source),
-            );
+    my $walk_elsif; $walk_elsif = sub ($elsif_node) {
+        my $ec = $elsif_node->try_child_by_field_name("condition");
+        my $eb = $elsif_node->try_child_by_field_name("block");
+        if (!$ec) {
+            # Find condition (scalar/expr after "elsif" keyword, before block)
+            for my $c ($elsif_node->child_nodes) {
+                if ($c->is_named && $c->type ne 'block' && $c->type ne 'elsif' && $c->type ne 'else') {
+                    $ec = $c;
+                    last;
+                }
+            }
         }
-        elsif ($child->type eq 'else') {
-            my $else_block_node = $child->try_child_by_field_name("block");
-            # If no field, find the block child directly
-            if (!$else_block_node) {
-                for my $ec ($child->child_nodes) {
-                    if ($ec->type eq 'block') {
-                        $else_block_node = $ec;
+        if (!$eb) {
+            for my $c ($elsif_node->child_nodes) {
+                if ($c->is_named && $c->type eq 'block') {
+                    $eb = $c;
+                    last;
+                }
+            }
+        }
+        push @elsif_clauses, ElsifClause(
+            _transform_node($ec, $source),
+            _transform_node($eb, $source),
+        ) if $ec && $eb;
+
+        # Check for nested elsif or else
+        for my $c ($elsif_node->child_nodes) {
+            if ($c->type eq 'elsif' && $c->is_named) {
+                $walk_elsif->($c);
+            }
+            elsif ($c->type eq 'else' && $c->is_named) {
+                for my $gc ($c->child_nodes) {
+                    if ($gc->is_named && $gc->type eq 'block') {
+                        $else_block = _transform_node($gc, $source);
                         last;
                     }
                 }
             }
-            $else_block = _transform_node($else_block_node, $source) if $else_block_node;
+        }
+    };
+
+    for my $child ($node->child_nodes) {
+        if ($child->type eq 'elsif' && $child->is_named) {
+            $walk_elsif->($child);
+        }
+        elsif ($child->type eq 'else' && $child->is_named) {
+            for my $gc ($child->child_nodes) {
+                if ($gc->is_named && $gc->type eq 'block') {
+                    $else_block = _transform_node($gc, $source);
+                    last;
+                }
+            }
         }
     }
 
@@ -665,6 +697,132 @@ sub _transform_return_expression ($node, $source) {
         $expr = _transform_node($named[0], $source);
     }
     LoopControl('return', undef, $expr);
+}
+
+# --- Subroutines ---
+
+sub _transform_subroutine_declaration_statement ($node, $source) {
+    my $name_node = $node->try_child_by_field_name("name");
+    my $body_node = $node->try_child_by_field_name("body");
+
+    # Declarator: check for "my" lexical field
+    my $declarator = 'sub';
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && $child->text eq 'my') {
+            $declarator = 'my';
+            last;
+        }
+    }
+
+    # Find signature child
+    my $sig;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'signature') {
+            $sig = _transform_signature($child, $source);
+            last;
+        }
+    }
+
+    my $name = $name_node ? $name_node->text : undef;
+    my $body = $body_node ? _transform_node($body_node, $source) : undef;
+
+    SubroutineDeclaration($declarator, $name, undef, undef, $sig, $body);
+}
+
+sub _transform_signature ($node, $source) {
+    my @params;
+    for my $child ($node->child_nodes) {
+        next unless $child->is_named;
+        next if $child->is_extra;
+        my $type = $child->type;
+        if ($type eq 'mandatory_parameter' || $type eq 'optional_parameter' ||
+            $type eq 'named_parameter' || $type eq 'slurpy_parameter') {
+            my $handler = __PACKAGE__->can("_transform_${type}");
+            push @params, $handler->($child, $source) if $handler;
+        }
+    }
+    Signature(\@params);
+}
+
+sub _transform_mandatory_parameter ($node, $source) {
+    my $name = _extract_param_variable($node);
+    ScalarParam($name, undef, 0);
+}
+
+sub _transform_optional_parameter ($node, $source) {
+    my $name = _extract_param_variable($node);
+    my $default_node = $node->try_child_by_field_name("default");
+    my $default = $default_node ? _transform_node($default_node, $source) : undef;
+    ScalarParam($name, $default, 0);
+}
+
+sub _transform_named_parameter ($node, $source) {
+    my $name = _extract_param_variable($node);
+    my $default_node = $node->try_child_by_field_name("default");
+    my $default = $default_node ? _transform_node($default_node, $source) : undef;
+    ScalarParam($name, $default, 1);
+}
+
+sub _transform_slurpy_parameter ($node, $source) {
+    my $text = $node->text;
+    # Remove leading whitespace, commas, etc.
+    $text =~ s/^\s*,?\s*//;
+    my $sigil = substr($text, 0, 1);
+    my $name  = substr($text, 1);
+    SlurpyParam($sigil, $name);
+}
+
+sub _extract_param_variable ($node) {
+    # Find the scalar child to get the variable name
+    for my $child ($node->child_nodes) {
+        if ($child->type eq 'scalar') {
+            my $text = $child->text;
+            return substr($text, 1);  # strip $
+        }
+    }
+    die "Cannot find variable in parameter node\n";
+}
+
+sub _transform_anonymous_subroutine_expression ($node, $source) {
+    my $body_node = $node->try_child_by_field_name("body");
+
+    # Find signature child
+    my $sig;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'signature') {
+            $sig = _transform_signature($child, $source);
+            last;
+        }
+    }
+
+    my $body = $body_node ? _transform_node($body_node, $source) : undef;
+    AnonymousSub($sig, undef, undef, $body, 'sub');
+}
+
+sub _transform_coderef_call_expression ($node, $source) {
+    # First child (scalar or named) is the coderef
+    my $target;
+    for my $child ($node->child_nodes) {
+        my $type = $child->type;
+        if ($type eq 'scalar' || ($child->is_named && $type ne 'arguments')) {
+            $target = _transform_node($child, $source);
+            last if defined $target;
+        }
+    }
+
+    # Get args from arguments field
+    my @args;
+    my $args_node = $node->try_child_by_field_name("arguments");
+    if ($args_node) {
+        for my $child ($args_node->child_nodes) {
+            next unless $child->is_named || $child->type eq 'scalar';
+            next if $child->is_extra;
+            my $ast = _transform_node($child, $source);
+            push @args, $ast if defined $ast;
+        }
+    }
+
+    MethodCall($target, undef, \@args, 0);
 }
 
 1;
