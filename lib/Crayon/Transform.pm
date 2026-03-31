@@ -13,6 +13,7 @@ use Crayon::AST qw[
     Subscript ParenExpression ExpressionList
     Conditional ElsifClause WhileLoop ForeachLoop CStyleForLoop LoopControl
     SubroutineDeclaration Signature ScalarParam SlurpyParam AnonymousSub
+    ClassDeclaration RoleDeclaration MethodDeclaration FieldDeclaration Attribute
 ];
 
 our @EXPORT_OK = qw[ transform ];
@@ -291,6 +292,34 @@ sub _transform_variable_declaration ($node, $source) {
             my $ast = _transform_node($child, $source);
             push @variables, $ast if defined $ast;
         }
+    }
+
+    # Field declarations get special treatment
+    if ($declarator eq 'field') {
+        # Get attributes if present
+        my $attrs;
+        my $attrlist_node = $node->try_child_by_field_name("attributes");
+        if ($attrlist_node) {
+            $attrs = _transform_attrlist($attrlist_node, $source);
+        }
+
+        # Get default value if present (assignment after =)
+        my $default;
+        for my $child ($node->child_nodes) {
+            if ($child->is_named && $child->type eq 'assignment_expression') {
+                my $right = $child->try_child_by_field_name("right");
+                $default = _transform_node($right, $source) if $right;
+                last;
+            }
+        }
+        # Also check for initializer field
+        if (!$default) {
+            my $init = $node->try_child_by_field_name("initializer");
+            $default = _transform_node($init, $source) if $init;
+        }
+
+        my $var = @variables == 1 ? $variables[0] : $variables[0];
+        return FieldDeclaration($var, $attrs, $default);
     }
 
     VariableDeclaration($declarator, \@variables);
@@ -823,6 +852,204 @@ sub _transform_coderef_call_expression ($node, $source) {
     }
 
     MethodCall($target, undef, \@args, 0);
+}
+
+# --- Classes, Roles, Methods ---
+
+sub _transform_class_statement ($node, $source) {
+    my $name_node = $node->try_child_by_field_name("name");
+    my $name = $name_node ? $name_node->text : undef;
+
+    # Version
+    my $version_node = $node->try_child_by_field_name("version");
+    my $version = $version_node ? $version_node->text : undef;
+
+    # Attributes (:isa, :does, etc.)
+    my $attrs;
+    my $attrlist_node = $node->try_child_by_field_name("attributes");
+    if ($attrlist_node) {
+        $attrs = _transform_attrlist($attrlist_node, $source);
+    }
+
+    # Body block
+    my $body;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'block') {
+            $body = _transform_node($child, $source);
+            last;
+        }
+    }
+
+    ClassDeclaration($name, $version, $attrs, $body);
+}
+
+sub _transform_role_statement ($node, $source) {
+    my $name_node = $node->try_child_by_field_name("name");
+    my $name = $name_node ? $name_node->text : undef;
+
+    my $version_node = $node->try_child_by_field_name("version");
+    my $version = $version_node ? $version_node->text : undef;
+
+    my $attrs;
+    my $attrlist_node = $node->try_child_by_field_name("attributes");
+    if ($attrlist_node) {
+        $attrs = _transform_attrlist($attrlist_node, $source);
+    }
+
+    my $body;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'block') {
+            $body = _transform_node($child, $source);
+            last;
+        }
+    }
+
+    RoleDeclaration($name, $version, $attrs, $body);
+}
+
+sub _transform_method_declaration_statement ($node, $source) {
+    my $name_node = $node->try_child_by_field_name("name");
+    my $name = $name_node ? $name_node->text : undef;
+
+    # Check for "my" lexical declarator
+    my $declarator = 'method';
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && $child->text eq 'my') {
+            $declarator = 'my';
+            last;
+        }
+    }
+
+    # Attributes
+    my $attrs;
+    my $attrlist_node = $node->try_child_by_field_name("attributes");
+    if ($attrlist_node) {
+        $attrs = _transform_attrlist($attrlist_node, $source);
+    }
+
+    # Signature
+    my $sig;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'signature') {
+            $sig = _transform_signature($child, $source);
+            last;
+        }
+    }
+
+    # Body
+    my $body_node = $node->try_child_by_field_name("body");
+    my $body = $body_node ? _transform_node($body_node, $source) : undef;
+
+    MethodDeclaration($declarator, $name, $attrs, $sig, $body);
+}
+
+sub _transform_anonymous_method_expression ($node, $source) {
+    # Signature
+    my $sig;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'signature') {
+            $sig = _transform_signature($child, $source);
+            last;
+        }
+    }
+
+    # Body
+    my $body_node = $node->try_child_by_field_name("body");
+    if (!$body_node) {
+        for my $child ($node->child_nodes) {
+            if ($child->is_named && $child->type eq 'block') {
+                $body_node = $child;
+                last;
+            }
+        }
+    }
+    my $body = $body_node ? _transform_node($body_node, $source) : undef;
+
+    AnonymousSub($sig, undef, undef, $body, 'method');
+}
+
+sub _transform_method_call_expression ($node, $source) {
+    my $invocant_node = $node->try_child_by_field_name("invocant");
+    my $invocant = $invocant_node ? _transform_node($invocant_node, $source) : undef;
+
+    # Method name — available as named field "method"
+    my $method_node = $node->try_child_by_field_name("method");
+    my $method_name = $method_node ? $method_node->text : undef;
+
+    # Collect args: everything after "->" and method name that is not punctuation
+    # The "arguments" field may point to a single arg, not a container,
+    # so we gather all arg children manually.
+    my @args;
+    my $past_method = 0;
+    my $in_parens = 0;
+    for my $child ($node->child_nodes) {
+        if ($method_node && $child->start_byte == $method_node->start_byte && $child->is_named) {
+            $past_method = 1;
+            next;
+        }
+        next unless $past_method;
+        if (!$child->is_named) {
+            $in_parens = 1 if $child->text eq '(';
+            next;
+        }
+        next if $child->is_extra;
+        my $ast = _transform_node($child, $source);
+        push @args, $ast if defined $ast;
+    }
+
+    MethodCall($invocant, $method_name, \@args, 0);
+}
+
+sub _transform_class_phaser_statement ($node, $source) {
+    my $phase_node = $node->try_child_by_field_name("phase");
+    my $phase_name = $phase_node ? $phase_node->text : undef;
+
+    # Signature
+    my $sig;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'signature') {
+            $sig = _transform_signature($child, $source);
+            last;
+        }
+    }
+
+    # Block body
+    my $body;
+    for my $child ($node->child_nodes) {
+        if ($child->is_named && $child->type eq 'block') {
+            $body = _transform_node($child, $source);
+            last;
+        }
+    }
+
+    SubroutineDeclaration(undef, $phase_name, undef, undef, $sig, $body);
+}
+
+sub _transform_attrlist ($node, $source) {
+    my @attributes;
+    for my $child ($node->child_nodes) {
+        next unless $child->is_named;
+        next if $child->is_extra;
+        if ($child->type eq 'attribute') {
+            my $attr_name;
+            my $attr_args;
+            for my $ac ($child->child_nodes) {
+                if ($ac->is_named && $ac->type eq 'attribute_name') {
+                    $attr_name = $ac->text;
+                }
+            }
+            # Look for parenthesized args — text after attribute_name
+            # The full attribute text minus the name gives us the args
+            if ($attr_name) {
+                my $full = $child->text;
+                if ($full =~ /^\Q$attr_name\E\((.+)\)$/) {
+                    $attr_args = $1;
+                }
+            }
+            push @attributes, Attribute($attr_name, $attr_args) if $attr_name;
+        }
+    }
+    \@attributes;
 }
 
 1;
