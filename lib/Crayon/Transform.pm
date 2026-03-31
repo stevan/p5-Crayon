@@ -139,4 +139,47 @@ sub _transform_func0op_call_expression ($node, $source) {
     Call($text, undef, [], undef, 0);
 }
 
+sub _transform_ambiguous_function_call_expression ($node, $source) {
+    my $func_node = $node->try_child_by_field_name("function");
+    my $name = $func_node->text;
+    my $func_start = $func_node->start_byte;
+    my @args;
+    for my $child ($node->child_nodes) {
+        next unless $child->is_named;
+        next if $child->is_extra;
+        next if $child->start_byte == $func_start;
+        push @args, _transform_node($child, $source);
+    }
+    Call($name, undef, \@args, undef, 0);
+}
+
+sub _transform_function_call_expression ($node, $source) {
+    my $func_node = $node->try_child_by_field_name("function");
+    my $name = $func_node->text;
+    my @args;
+    my $args_node = $node->try_child_by_field_name("arguments");
+    if ($args_node) {
+        for my $child ($args_node->child_nodes) {
+            next unless $child->is_named;
+            next if $child->is_extra;
+            push @args, _transform_node($child, $source);
+        }
+    }
+    Call($name, undef, \@args, undef, 0);
+}
+
+sub _transform_func1op_call_expression ($node, $source) {
+    my $func_node = $node->try_child_by_field_name("function");
+    my $name = $func_node ? $func_node->text : (grep { !$_->is_named } $node->child_nodes)[0]->text;
+    my $func_start = $func_node ? $func_node->start_byte : -1;
+    my @args;
+    for my $child ($node->child_nodes) {
+        next unless $child->is_named;
+        next if $child->is_extra;
+        next if $func_start >= 0 && $child->start_byte == $func_start;
+        push @args, _transform_node($child, $source);
+    }
+    Call($name, undef, \@args, undef, 0);
+}
+
 1;

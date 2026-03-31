@@ -77,4 +77,19 @@ sub transform_expr ($source) {
     is $ast->{type}, 'Yada', 'yada type';
 }
 
+use Crayon::Test qw[ crayon_eval crayon_output ];
+
+# End-to-end evaluation
+is crayon_eval('42'), 42, 'eval integer';
+is crayon_eval('3.14'), 3.14, 'eval float';
+is crayon_eval("'hello'"), 'hello', 'eval single-quoted string';
+is crayon_eval('"world"'), 'world', 'eval double-quoted string';
+is crayon_eval('true'), 1, 'eval true';
+is crayon_eval('false'), 0, 'eval false';
+ok !defined crayon_eval('undef'), 'eval undef';
+
+# Output
+is crayon_output('say 42'), "42\n", 'say integer';
+is crayon_output('say "hello"'), "hello\n", 'say string';
+
 done_testing;

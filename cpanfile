@@ -1,5 +1,5 @@
 requires 'perl', 'v5.42.0';
-requires 'Text::TreeSitter';
+requires 'Text::Treesitter';
 
 on 'test' => sub {
     requires 'Test2::V0';
