@@ -5,12 +5,13 @@ use utf8;
 use Exporter 'import';
 
 use Crayon::AST qw[
-    Program StatementSequence ExpressionStatement Block
+    Program StatementSequence ExpressionStatement PostfixModifier Block
     Integer Float String Bool Undef SpecialLiteral QuotedWords Yada
     Call
     Variable VariableDeclaration Assignment
     BinaryOp UnaryOp PostfixOp Ternary
     Subscript ParenExpression ExpressionList
+    Conditional ElsifClause WhileLoop ForeachLoop CStyleForLoop LoopControl
 ];
 
 our @EXPORT_OK = qw[ transform ];
@@ -483,6 +484,187 @@ sub _transform_parenthesized_expression ($node, $source) {
         return ParenExpression($named[0]);
     }
     ParenExpression(ExpressionList(\@named));
+}
+
+# --- Control Flow ---
+
+sub _transform_conditional_statement ($node, $source) {
+    # Get keyword (if/unless) from first anonymous child
+    my $keyword;
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && ($child->text eq 'if' || $child->text eq 'unless')) {
+            $keyword = $child->text;
+            last;
+        }
+    }
+    my $negated = ($keyword eq 'unless') ? 1 : 0;
+
+    # Get condition and block
+    my $cond_node  = $node->try_child_by_field_name("condition");
+    my $block_node = $node->try_child_by_field_name("block");
+
+    my $condition  = _transform_node($cond_node, $source);
+    my $then_block = _transform_node($block_node, $source);
+
+    # Scan for elsif and else children
+    my @elsif_clauses;
+    my $else_block;
+    for my $child ($node->child_nodes) {
+        if ($child->type eq 'elsif') {
+            my $elsif_cond  = $child->try_child_by_field_name("condition");
+            my $elsif_block = $child->try_child_by_field_name("block");
+            push @elsif_clauses, ElsifClause(
+                _transform_node($elsif_cond, $source),
+                _transform_node($elsif_block, $source),
+            );
+        }
+        elsif ($child->type eq 'else') {
+            my $else_block_node = $child->try_child_by_field_name("block");
+            # If no field, find the block child directly
+            if (!$else_block_node) {
+                for my $ec ($child->child_nodes) {
+                    if ($ec->type eq 'block') {
+                        $else_block_node = $ec;
+                        last;
+                    }
+                }
+            }
+            $else_block = _transform_node($else_block_node, $source) if $else_block_node;
+        }
+    }
+
+    Conditional($condition, $negated, $then_block, \@elsif_clauses, $else_block);
+}
+
+sub _transform_loop_statement ($node, $source) {
+    my $keyword;
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && ($child->text eq 'while' || $child->text eq 'until')) {
+            $keyword = $child->text;
+            last;
+        }
+    }
+    my $negated = ($keyword eq 'until') ? 1 : 0;
+
+    my $cond_node  = $node->try_child_by_field_name("condition");
+    my $block_node = $node->try_child_by_field_name("block");
+
+    my $condition = _transform_node($cond_node, $source);
+    my $block     = _transform_node($block_node, $source);
+
+    my $continue_block;
+    my $cont_node = $node->try_child_by_field_name("continue");
+    if ($cont_node) {
+        $continue_block = _transform_node($cont_node, $source);
+    }
+
+    WhileLoop($condition, $negated, $block, $continue_block);
+}
+
+sub _transform_for_statement ($node, $source) {
+    my $var_node   = $node->try_child_by_field_name("variable");
+    my $list_node  = $node->try_child_by_field_name("list");
+    my $block_node = $node->try_child_by_field_name("block");
+
+    my $iterator = _transform_node($var_node, $source);
+    my $list     = _transform_node($list_node, $source);
+    my $block    = _transform_node($block_node, $source);
+
+    my $continue_block;
+    my $cont_node = $node->try_child_by_field_name("continue");
+    if ($cont_node) {
+        $continue_block = _transform_node($cont_node, $source);
+    }
+
+    ForeachLoop($iterator, $list, $block, $continue_block);
+}
+
+sub _transform_cstyle_for_statement ($node, $source) {
+    my $init_node  = $node->try_child_by_field_name("initialiser");
+    my $cond_node  = $node->try_child_by_field_name("condition");
+    my $iter_node  = $node->try_child_by_field_name("iterator");
+    my $block_node = $node->try_child_by_field_name("block");
+
+    my $init = $init_node ? _transform_node($init_node, $source) : undef;
+    my $cond = $cond_node ? _transform_node($cond_node, $source) : undef;
+    my $incr = $iter_node ? _transform_node($iter_node, $source) : undef;
+    my $block = _transform_node($block_node, $source);
+
+    CStyleForLoop($init, $cond, $incr, $block);
+}
+
+sub _transform_postfix_conditional_expression ($node, $source) {
+    # Body is first named child, condition is field
+    my @named = grep { $_->is_named && !$_->is_extra } $node->child_nodes;
+    my $body = _transform_node($named[0], $source);
+    my $cond_node = $node->try_child_by_field_name("condition");
+    my $condition = _transform_node($cond_node, $source);
+
+    # Get keyword (if/unless)
+    my $keyword;
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && ($child->text eq 'if' || $child->text eq 'unless')) {
+            $keyword = $child->text;
+            last;
+        }
+    }
+
+    ExpressionStatement($body, PostfixModifier($keyword, $condition));
+}
+
+sub _transform_postfix_for_expression ($node, $source) {
+    my @named = grep { $_->is_named && !$_->is_extra } $node->child_nodes;
+    my $body = _transform_node($named[0], $source);
+    my $list_node = $node->try_child_by_field_name("list");
+    my $list = _transform_node($list_node, $source);
+
+    ExpressionStatement($body, PostfixModifier('for', $list));
+}
+
+sub _transform_postfix_loop_expression ($node, $source) {
+    my @named = grep { $_->is_named && !$_->is_extra } $node->child_nodes;
+    my $body = _transform_node($named[0], $source);
+    my $cond_node = $node->try_child_by_field_name("condition");
+    my $condition = _transform_node($cond_node, $source);
+
+    my $keyword;
+    for my $child ($node->child_nodes) {
+        if (!$child->is_named && ($child->text eq 'while' || $child->text eq 'until')) {
+            $keyword = $child->text;
+            last;
+        }
+    }
+
+    ExpressionStatement($body, PostfixModifier($keyword, $condition));
+}
+
+sub _transform_loopex_expression ($node, $source) {
+    my $loopex_node = $node->try_child_by_field_name("loopex");
+    my $keyword = $loopex_node->text;
+
+    # Check for optional label argument
+    my $label;
+    my @named = grep { $_->is_named && !$_->is_extra } $node->child_nodes;
+    if (@named) {
+        # If there's a named child that's not the loopex keyword itself
+        for my $child (@named) {
+            if ($child->start_byte != $loopex_node->start_byte) {
+                $label = $child->text;
+                last;
+            }
+        }
+    }
+
+    LoopControl($keyword, $label, undef);
+}
+
+sub _transform_return_expression ($node, $source) {
+    my @named = grep { $_->is_named && !$_->is_extra } $node->child_nodes;
+    my $expr;
+    if (@named) {
+        $expr = _transform_node($named[0], $source);
+    }
+    LoopControl('return', undef, $expr);
 }
 
 1;

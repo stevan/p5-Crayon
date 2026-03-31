@@ -26,6 +26,45 @@ class Crayon::Interpreter {
     }
 
     method eval_ExpressionStatement ($ast) {
+        if (my $mod = $ast->{modifier}) {
+            my $kw = $mod->{keyword};
+            if ($kw eq 'if') {
+                return $self->eval($ast->{expression}) if $self->eval($mod->{expression});
+                return undef;
+            }
+            if ($kw eq 'unless') {
+                return $self->eval($ast->{expression}) unless $self->eval($mod->{expression});
+                return undef;
+            }
+            if ($kw eq 'while') {
+                my $result;
+                while ($self->eval($mod->{expression})) {
+                    $result = $self->eval($ast->{expression});
+                }
+                return $result;
+            }
+            if ($kw eq 'until') {
+                my $result;
+                until ($self->eval($mod->{expression})) {
+                    $result = $self->eval($ast->{expression});
+                }
+                return $result;
+            }
+            if ($kw eq 'for' || $kw eq 'foreach') {
+                my $list_val = $self->eval($mod->{expression});
+                my @list = ref $list_val eq 'ARRAY' ? @$list_val : ($list_val);
+                my $result;
+                my $old_env = $env;
+                $env = $env->child;
+                $env->define('$_', undef);
+                for my $item (@list) {
+                    $env->assign('$_', $item);
+                    $result = $self->eval($ast->{expression});
+                }
+                $env = $old_env;
+                return $result;
+            }
+        }
         $self->eval($ast->{expression});
     }
 
@@ -289,6 +328,123 @@ class Crayon::Interpreter {
 
     method eval_ParenExpression ($ast) {
         return $self->eval($ast->{expression});
+    }
+
+    # --- Control Flow ---
+
+    method eval_Conditional ($ast) {
+        my $cond = $self->eval($ast->{condition});
+        $cond = !$cond if $ast->{negated};
+
+        if ($cond) {
+            return $self->eval($ast->{then_block});
+        }
+
+        if ($ast->{elsif_clauses}) {
+            for my $elsif ($ast->{elsif_clauses}->@*) {
+                my $ec = $self->eval($elsif->{condition});
+                if ($ec) {
+                    return $self->eval($elsif->{block});
+                }
+            }
+        }
+
+        if ($ast->{else_block}) {
+            return $self->eval($ast->{else_block});
+        }
+
+        return undef;
+    }
+
+    method eval_WhileLoop ($ast) {
+        my $result;
+        while (1) {
+            my $cond = $self->eval($ast->{condition});
+            $cond = !$cond if $ast->{negated};
+            last unless $cond;
+            eval { $result = $self->eval($ast->{block}) };
+            if ($@) {
+                if (ref $@ eq 'HASH') {
+                    last if $@->{type} eq 'last';
+                    next if $@->{type} eq 'next';
+                }
+                die $@;
+            }
+        }
+        return $result;
+    }
+
+    method eval_ForeachLoop ($ast) {
+        my $list_val = $self->eval($ast->{list});
+        my @list = ref $list_val eq 'ARRAY' ? @$list_val : ($list_val);
+
+        my $iter = $ast->{iterator};
+        my $var_key = $iter->{sigil} . $iter->{name};
+
+        my $old_env = $env;
+        $env = $env->child;
+        $env->define($var_key, undef);
+
+        my $result;
+        for my $item (@list) {
+            $env->assign($var_key, $item);
+            eval { $result = $self->eval($ast->{block}) };
+            if ($@) {
+                if (ref $@ eq 'HASH') {
+                    if ($@->{type} eq 'last') {
+                        last;
+                    }
+                    if ($@->{type} eq 'next') {
+                        next;
+                    }
+                }
+                $env = $old_env;
+                die $@;
+            }
+        }
+        $env = $old_env;
+        return $result;
+    }
+
+    method eval_CStyleForLoop ($ast) {
+        my $old_env = $env;
+        $env = $env->child;
+
+        $self->eval($ast->{init}) if $ast->{init};
+
+        my $result;
+        while (1) {
+            if ($ast->{condition}) {
+                my $cond = $self->eval($ast->{condition});
+                last unless $cond;
+            }
+            eval { $result = $self->eval($ast->{block}) };
+            if ($@) {
+                if (ref $@ eq 'HASH') {
+                    if ($@->{type} eq 'last') {
+                        last;
+                    }
+                    if ($@->{type} eq 'next') {
+                        $self->eval($ast->{increment}) if $ast->{increment};
+                        next;
+                    }
+                }
+                $env = $old_env;
+                die $@;
+            }
+            $self->eval($ast->{increment}) if $ast->{increment};
+        }
+        $env = $old_env;
+        return $result;
+    }
+
+    method eval_LoopControl ($ast) {
+        my $keyword = $ast->{keyword};
+        if ($keyword eq 'return') {
+            my $value = $ast->{expression} ? $self->eval($ast->{expression}) : undef;
+            die +{ type => 'return', value => $value };
+        }
+        die +{ type => $keyword, label => $ast->{label} };
     }
 
     # --- Helper (plain sub, not a method) ---
